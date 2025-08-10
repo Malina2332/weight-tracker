@@ -5,6 +5,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import gspread   # ← AJOUTER CECI
 from datetime import date, datetime, timedelta
 import altair as alt
 from google.oauth2.service_account import Credentials
