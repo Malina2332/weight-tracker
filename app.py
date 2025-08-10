@@ -1,4 +1,4 @@
-# app.py — Трекер веса (Streamlit, RU) с автосохранением в Google Sheets
+# app.py — Трекер веса (Streamlit, RU) с автосохранением в Google Sheets + Диагностика
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -9,16 +9,40 @@ from google.oauth2.service_account import Credentials
 
 st.set_page_config(page_title="Трекер веса", page_icon="🏃‍♀️", layout="wide")
 
-# ---------- Настройка доступа к Google Sheets ----------
-SHEET_ID = st.secrets["sheets"]["sheet_id"]
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
-CREDS = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=SCOPES)
-gc = gspread.authorize(CREDS)
-sh = gc.open_by_key(SHEET_ID)
-ws = sh.worksheet("Data")
+# ---------- Попытка подключиться к Google Sheets (диагностика) ----------
+def connect_sheets():
+    try:
+        sheet_id = st.secrets["sheets"]["sheet_id"]
+        creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"],
+                                                      scopes=["https://www.googleapis.com/auth/spreadsheets"])
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(sheet_id)
+        ws = sh.worksheet("Data")
+        return {"ok": True, "gc": gc, "sh": sh, "ws": ws, "msg": "OK"}
+    except KeyError as e:
+        return {"ok": False, "msg": f"Секреты не найдены/неверны: отсутствует ключ {e}. Проверь secrets.toml."}
+    except gspread.exceptions.APIError as e:
+        return {"ok": False, "msg": f"API ошибка: {e}. Проверь доступ (Поделиться → редактор) и sheet_id."}
+    except gspread.exceptions.WorksheetNotFound:
+        return {"ok": False, "msg": "Лист 'Data' не найден. Переименуй первый лист в 'Data'."}
+    except Exception as e:
+        return {"ok": False, "msg": f"Не удалось подключиться: {e}"}
+
+conn = connect_sheets()
+
+# Баннер диагностики
+with st.expander("🔎 Диагностика Google Sheets (раскрой, если что-то не работает)", expanded=not conn["ok"]):
+    if conn["ok"]:
+        st.success("Подключение к Google Sheets: OK")
+    else:
+        st.error(conn["msg"])
+        st.stop()  # Остановим приложение, пока не исправишь конфиг
+
+# Если мы здесь — подключение прошло
+gc, sh, ws = conn["gc"], conn["sh"], conn["ws"]
 
 HEADERS = ["Дата","Вес (кг)","Калории (ккал)","Белки (г)","Жиры (г)","Углеводы (г)","Тип тренировки","Выполнено","Шаги","Заметки"]
-DATE_FMT = "%d.%m.%Y"
+DATE_FMT = "%d.%м.%Y"  # оставляем старый формат, если уже вводишь так
 
 def _ensure_headers():
     rows = ws.get_all_values()
@@ -34,12 +58,10 @@ def read_df():
     rows = ws.get_all_values()
     if len(rows) <= 1:
         return pd.DataFrame(columns=HEADERS)
-
     df = pd.DataFrame(rows[1:], columns=rows[0])
     for c in HEADERS:
         if c not in df.columns:
             df[c] = ""
-
     def to_date(x):
         if not x:
             return None
@@ -52,12 +74,9 @@ def read_df():
             return pd.to_datetime(x).date()
         except:
             return None
-
     df["Дата"] = df["Дата"].apply(to_date)
-    num_cols = ["Вес (кг)","Калории (ккал)","Белки (г)","Жиры (г)","Углеводы (г)","Шаги"]
-    for c in num_cols:
+    for c in ["Вес (кг)","Калории (ккал)","Белки (г)","Жиры (г)","Углеводы (г)","Шаги"]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
-
     return df.dropna(subset=["Дата"]).sort_values("Дата")
 
 def upsert_row(entry: dict):
@@ -69,7 +88,6 @@ def upsert_row(entry: dict):
         if d == target_str:
             row_idx = i
             break
-
     values = [
         target_str,
         entry.get("Вес (кг)", ""),
@@ -82,19 +100,30 @@ def upsert_row(entry: dict):
         entry.get("Шаги", ""),
         entry.get("Заметки", ""),
     ]
-
     if row_idx:
         ws.update(f"A{row_idx}:J{row_idx}", [values])
     else:
         ws.append_row(values, value_input_option="USER_ENTERED")
 
-def forecast_df(start_date: date, start_weight: float, weekly_loss: float, days=400, goal_weight=None):
-    if goal_weight is None:
-        goal_weight = max(30.0, start_weight - 100.0)
-    dates = pd.date_range(start_date, periods=days, freq="D")
-    planned = [max(start_weight - weekly_loss*(i/7.0), goal_weight) for i in range(days)]
-    return pd.DataFrame({"Дата": dates, "План (кг)": planned})
+# ---------- Блок быстрых тестов ----------
+st.info("Если что-то не работало раньше — нажми ниже 'Тест записи', чтобы проверить доступ к таблице.")
+t1, t2 = st.columns(2)
+if t1.button("🧪 Тест записи"):
+    try:
+        test_entry = {
+            "Дата": date.today(),
+            "Вес (кг)": 0, "Калории (ккал)": 0, "Белки (г)": 0, "Жиры (г)": 0, "Углеводы (г)": 0,
+            "Тип тренировки": "ТЕСТ", "Выполнено": "✅", "Шаги": 0, "Заметки": "Test row"
+        }
+        upsert_row(test_entry)
+        st.success("Тестовая строка добавлена/обновлена. Проверь лист 'Data'.")
+    except Exception as e:
+        st.error(f"Тест не прошел: {e}")
 
+if t2.button("🔄 Обновить таблицу"):
+    st.experimental_rerun()
+
+# ---------- Дальше — твое приложение (как было) ----------
 if "start_weight" not in st.session_state: st.session_state.start_weight = 83.0
 if "start_date"   not in st.session_state: st.session_state.start_date   = date(2025, 7, 27)
 if "target_loss"  not in st.session_state: st.session_state.target_loss  = 30.0
@@ -138,22 +167,13 @@ note = st.text_area("📝 Заметки", placeholder="Самочувствие
 col_btn1, col_btn2 = st.columns(2)
 save_clicked = col_btn1.button("💾 Сохранить", use_container_width=True)
 quick_done   = col_btn2.button("✔️ Отметить день (✅)", use_container_width=True)
-
 if quick_done:
     done = "✅"
 
 if save_clicked or quick_done:
     entry = {
-        "Дата": d,
-        "Вес (кг)": w,
-        "Калории (ккал)": kcal,
-        "Белки (г)": prot,
-        "Жиры (г)": fat,
-        "Углеводы (г)": carb,
-        "Тип тренировки": ttype,
-        "Выполнено": done,
-        "Шаги": steps,
-        "Заметки": note
+        "Дата": d, "Вес (кг)": w, "Калории (ккал)": kcal, "Белки (г)": prot, "Жиры (г)": fat,
+        "Углеводы (г)": carb, "Тип тренировки": ttype, "Выполнено": done, "Шаги": steps, "Заметки": note
     }
     try:
         upsert_row(entry)
@@ -163,7 +183,14 @@ if save_clicked or quick_done:
 
 st.divider()
 
-df = read_df()
+def safe_read():
+    try:
+        return read_df()
+    except Exception as e:
+        st.error(f"Ошибка чтения таблицы: {e}")
+        return pd.DataFrame(columns=HEADERS)
+
+df = safe_read()
 st.subheader("Последние записи")
 if df.empty:
     st.info("Пока нет записей.")
@@ -182,10 +209,13 @@ m3.metric("Прогресс к цели", f"{target_pct*100:.1f}%" if target_pct
 m4.metric("Целевой вес", f"{goal_w:.1f}")
 m5.metric("Скорость", f"{st.session_state.weekly_loss:.2f} кг/нед")
 
-plan = forecast_df(st.session_state.start_date, st.session_state.start_weight, st.session_state.weekly_loss, days=400, goal_weight=goal_w)
+plan = pd.DataFrame()
+plan["Дата"] = pd.date_range(st.session_state.start_date, periods=400, freq="D")
+plan["План (кг)"] = [max(st.session_state.start_weight - st.session_state.weekly_loss*(i/7.0), goal_w) for i in range(400)]
 dfc = df.copy()
 if not dfc.empty:
     dfc["Дата"] = pd.to_datetime(dfc["Дата"])
+
 chart_df = pd.merge(plan, dfc[["Дата","Вес (кг)"]], on="Дата", how="left")
 
 st.subheader("📈 Вес: Факт vs План")
@@ -197,4 +227,3 @@ chart = alt.Chart(chart_df).transform_fold(
     color="Серия:N"
 ).properties(height=360)
 st.altair_chart(chart, use_container_width=True)
-
