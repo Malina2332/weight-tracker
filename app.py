@@ -1,13 +1,6 @@
 # app.py — Трекер веса (Streamlit, RU) с автосохранением в Google Sheets + Диагностика
 
-# --- Auto-install si Streamlit Cloud n'a pas pris en compte requirements.txt ---
-try:
-    import gspread  # noqa
-except ModuleNotFoundError:
-    import sys, subprocess
-    subprocess.check_call([sys.executable, "-m", "pip", "install",
-                           "gspread==6.0.2", "google-auth==2.33.0"])
-    import gspread  # re-import après install
+
 
 import streamlit as st
 import pandas as pd
