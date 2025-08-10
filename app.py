@@ -1,48 +1,58 @@
 # app.py — Трекер веса (Streamlit, RU) с автосохранением в Google Sheets + Диагностика
+
+# --- Auto-install si Streamlit Cloud n'a pas pris en compte requirements.txt ---
+try:
+    import gspread  # noqa
+except ModuleNotFoundError:
+    import sys, subprocess
+    subprocess.check_call([sys.executable, "-m", "pip", "install",
+                           "gspread==6.0.2", "google-auth==2.33.0"])
+    import gspread  # re-import après install
+
 import streamlit as st
 import pandas as pd
 import numpy as np
 from datetime import date, datetime, timedelta
 import altair as alt
-import gspread
 from google.oauth2.service_account import Credentials
 
 st.set_page_config(page_title="Трекер веса", page_icon="🏃‍♀️", layout="wide")
 
-# ---------- Попытка подключиться к Google Sheets (диагностика) ----------
+# ---------- Подключение к Google Sheets (диагностика) ----------
 def connect_sheets():
     try:
         sheet_id = st.secrets["sheets"]["sheet_id"]
-        creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"],
-                                                      scopes=["https://www.googleapis.com/auth/spreadsheets"])
+        creds = Credentials.from_service_account_info(
+            st.secrets["gcp_service_account"],
+            scopes=["https://www.googleapis.com/auth/spreadsheets"]
+        )
         gc = gspread.authorize(creds)
         sh = gc.open_by_key(sheet_id)
         ws = sh.worksheet("Data")
         return {"ok": True, "gc": gc, "sh": sh, "ws": ws, "msg": "OK"}
     except KeyError as e:
         return {"ok": False, "msg": f"Секреты не найдены/неверны: отсутствует ключ {e}. Проверь secrets.toml."}
-    except gspread.exceptions.APIError as e:
-        return {"ok": False, "msg": f"API ошибка: {e}. Проверь доступ (Поделиться → редактор) и sheet_id."}
     except gspread.exceptions.WorksheetNotFound:
         return {"ok": False, "msg": "Лист 'Data' не найден. Переименуй первый лист в 'Data'."}
+    except gspread.exceptions.APIError as e:
+        return {"ok": False, "msg": f"API ошибка: {e}. Проверь доступ (Поделиться → редактор) и sheet_id."}
     except Exception as e:
         return {"ok": False, "msg": f"Не удалось подключиться: {e}"}
 
 conn = connect_sheets()
 
-# Баннер диагностики
 with st.expander("🔎 Диагностика Google Sheets (раскрой, если что-то не работает)", expanded=not conn["ok"]):
     if conn["ok"]:
         st.success("Подключение к Google Sheets: OK")
     else:
         st.error(conn["msg"])
-        st.stop()  # Остановим приложение, пока не исправишь конфиг
+        st.stop()  # Останавливаем, пока конфиг не исправлен
 
 # Если мы здесь — подключение прошло
 gc, sh, ws = conn["gc"], conn["sh"], conn["ws"]
 
 HEADERS = ["Дата","Вес (кг)","Калории (ккал)","Белки (г)","Жиры (г)","Углеводы (г)","Тип тренировки","Выполнено","Шаги","Заметки"]
-DATE_FMT = "%d.%м.%Y"  # оставляем старый формат, если уже вводишь так
+DATE_FMT = "%d.%m.%Y"  # исправлено: латинская 'm'
 
 def _ensure_headers():
     rows = ws.get_all_values()
@@ -59,9 +69,13 @@ def read_df():
     if len(rows) <= 1:
         return pd.DataFrame(columns=HEADERS)
     df = pd.DataFrame(rows[1:], columns=rows[0])
+
+    # гарантируем наличие всех колонок
     for c in HEADERS:
         if c not in df.columns:
             df[c] = ""
+
+    # приведение типов
     def to_date(x):
         if not x:
             return None
@@ -74,20 +88,25 @@ def read_df():
             return pd.to_datetime(x).date()
         except:
             return None
+
     df["Дата"] = df["Дата"].apply(to_date)
     for c in ["Вес (кг)","Калории (ккал)","Белки (г)","Жиры (г)","Углеводы (г)","Шаги"]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
+
     return df.dropna(subset=["Дата"]).sort_values("Дата")
 
 def upsert_row(entry: dict):
     _ensure_headers()
     target_str = entry["Дата"].strftime(DATE_FMT)
-    col_dates = ws.col_values(1)[1:]
+
+    # ищем существующую дату в колонке A
+    col_dates = ws.col_values(1)[1:]  # без заголовка
     row_idx = None
     for i, d in enumerate(col_dates, start=2):
         if d == target_str:
             row_idx = i
             break
+
     values = [
         target_str,
         entry.get("Вес (кг)", ""),
@@ -100,6 +119,7 @@ def upsert_row(entry: dict):
         entry.get("Шаги", ""),
         entry.get("Заметки", ""),
     ]
+
     if row_idx:
         ws.update(f"A{row_idx}:J{row_idx}", [values])
     else:
@@ -123,7 +143,7 @@ if t1.button("🧪 Тест записи"):
 if t2.button("🔄 Обновить таблицу"):
     st.experimental_rerun()
 
-# ---------- Дальше — твое приложение (как было) ----------
+# ---------- Приложение ----------
 if "start_weight" not in st.session_state: st.session_state.start_weight = 83.0
 if "start_date"   not in st.session_state: st.session_state.start_date   = date(2025, 7, 27)
 if "target_loss"  not in st.session_state: st.session_state.target_loss  = 30.0
@@ -209,9 +229,11 @@ m3.metric("Прогресс к цели", f"{target_pct*100:.1f}%" if target_pct
 m4.metric("Целевой вес", f"{goal_w:.1f}")
 m5.metric("Скорость", f"{st.session_state.weekly_loss:.2f} кг/нед")
 
+# План + график
 plan = pd.DataFrame()
 plan["Дата"] = pd.date_range(st.session_state.start_date, periods=400, freq="D")
 plan["План (кг)"] = [max(st.session_state.start_weight - st.session_state.weekly_loss*(i/7.0), goal_w) for i in range(400)]
+
 dfc = df.copy()
 if not dfc.empty:
     dfc["Дата"] = pd.to_datetime(dfc["Дата"])
